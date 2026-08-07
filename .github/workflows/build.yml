@@ -1,0 +1,113 @@
+name: Build and Push Derper Image
+
+on:
+  # 推送到 main 时构建（首次初始化 + Dockerfile 变更）
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .github/workflows/build.yml
+      - .github/workflows/version.json
+
+  # 每天检查 Tailscale 新版本
+  schedule:
+    - cron: '0 2 * * *'
+
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tailscale version tag (e.g. v1.102.2), leave empty for latest'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: derper
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      built: ${{ steps.check.outputs.built }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ──── 确定要构建的版本号 ────
+      - name: Resolve Tailscale version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=$(curl -fsSL https://api.github.com/repos/tailscale/tailscale/releases/latest \
+              | jq -r '.tag_name')
+          fi
+          echo "Resolved version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # ──── 检查这个版本的镜像是否已经构建过 ────
+      - name: Check if image already exists
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://ghcr.io/v2/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')/${{ env.IMAGE_NAME }}/manifests/$VERSION")
+
+          if [ "$RESPONSE" = "200" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Image $VERSION already exists, skipping scheduled build"
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip build
+        if: steps.check.outputs.built == 'false'
+        run: echo "No new version to build. Stopping."
+
+      # ──── 构建并推送 ────
+      - name: Set up QEMU
+        if: steps.check.outputs.built == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.built == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.check.outputs.built == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        if: steps.check.outputs.built == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push
+        if: steps.check.outputs.built == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            DERP_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
