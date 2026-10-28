@@ -35,7 +35,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       built: ${{ steps.check.outputs.built }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ──── 确定要构建的版本号 ────
       - name: Resolve Tailscale version
