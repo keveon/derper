@@ -20,7 +20,7 @@ RUN if [ "$DERP_VERSION" = "latest" ]; then \
     fi
 
 # ---- 运行阶段：最小化镜像 ----
-FROM alpine:3.22
+FROM alpine:3.24
 
 # derper 依赖 ca-certificates 做 TLS 验证
 # tzdata 确保日志时间戳正确
