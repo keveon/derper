@@ -26,7 +26,6 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: derper
   REGISTRY: ghcr.io
 
 jobs:
@@ -52,16 +51,31 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # ──── 检查这个版本的镜像是否已经构建过 ────
+      # 推送标签是 ghcr.io/<owner>/<repo>:$VERSION（与下方 metadata-action 的 images 一致）。
+      # 多架构构建产物是 OCI index；Accept 不含 index 类型时 GHCR 对已存在的标签也返回 404。
+      # GITHUB_TOKEN 是 registry 的登录密码，manifest 请求要先换成 pull scope 的 bearer。
       - name: Check if image already exists
         id: check
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://ghcr.io/v2/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')/${{ env.IMAGE_NAME }}/manifests/$VERSION")
+          IMAGE=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "Checking ${{ env.REGISTRY }}/${IMAGE}:${VERSION}"
+          REGISTRY_TOKEN=$(curl -fsSL \
+            --user "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "https://${{ env.REGISTRY }}/token?service=${{ env.REGISTRY }}&scope=repository:${IMAGE}:pull" \
+            | jq -r '.token // empty')
+          if [ -z "$REGISTRY_TOKEN" ]; then
+            echo "Could not obtain a GHCR pull token for ${IMAGE}"
+            exit 1
+          fi
+          RESPONSE=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+            "https://${{ env.REGISTRY }}/v2/${IMAGE}/manifests/${VERSION}")
+          echo "Manifest HTTP ${RESPONSE}"
 
           if [ "$RESPONSE" = "200" ] && [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "Image $VERSION already exists, skipping scheduled build"
+            echo "Image ${{ env.REGISTRY }}/${IMAGE}:${VERSION} already exists, skipping scheduled build"
             echo "built=false" >> "$GITHUB_OUTPUT"
           else
             echo "built=true" >> "$GITHUB_OUTPUT"
